@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  whatsapp-bot:
+    build: .
+    container_name: whatsapp-bot-llm
+    restart: unless-stopped
+    volumes:
+      # Mount required persistent directories as specified in CLAUDE.md
+      - ./auth_info_baileys:/app/auth_info_baileys
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    # Enforce localhost-only networking constraints (no external exposed ports)
+    network_mode: "host"

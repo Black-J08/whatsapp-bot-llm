@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+auth_info_baileys/
+data/
+logs/
+.claude/
+*.log
+.swarm
