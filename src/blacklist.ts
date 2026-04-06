@@ -25,16 +25,24 @@ export const initializeBlacklist = (): void => {
         const dataDir = path.dirname(config.blacklist.filePath);
         if (!fs.existsSync(dataDir)) {
             fs.mkdirSync(dataDir, { recursive: true });
-            logger.debug('[Blacklist] Created data directory');
+            logger.info({ path: dataDir }, '[Blacklist] Created data directory');
         }
 
         // Create the blacklist file if it doesn't exist
         if (!fs.existsSync(config.blacklist.filePath)) {
             fs.writeFileSync(config.blacklist.filePath, JSON.stringify([], null, 2), 'utf-8');
-            logger.info('[Blacklist] Initialized blacklist file with empty array');
+            logger.info(
+                { filePath: config.blacklist.filePath },
+                '[Blacklist] Initialized blacklist file with empty array'
+            );
+        } else {
+            logger.info({ filePath: config.blacklist.filePath }, '[Blacklist] Blacklist file already exists');
         }
     } catch (error) {
-        logger.error({ err: error }, '[Blacklist] Failed to initialize blacklist file');
+        logger.error(
+            { err: error, filePath: config.blacklist.filePath },
+            '[Blacklist] Failed to initialize blacklist file'
+        );
     }
 };
 
@@ -43,11 +51,13 @@ export const initializeBlacklist = (): void => {
  * is always in sync with manual file edits — no restart required.
  *
  * Returns an empty array if the file is missing or unreadable (logs the error).
+ * Filters out invalid entries (missing or empty identifier).
  */
 const loadBlacklist = (): BlacklistEntry[] => {
     try {
         // Return empty array if file doesn't exist yet
         if (!fs.existsSync(config.blacklist.filePath)) {
+            logger.debug({ filePath: config.blacklist.filePath }, '[Blacklist] File does not exist');
             return [];
         }
 
@@ -57,13 +67,49 @@ const loadBlacklist = (): BlacklistEntry[] => {
 
         // Validate that entries is an array
         if (!Array.isArray(entries)) {
-            logger.warn('[Blacklist] File does not contain a JSON array — treating as empty');
+            logger.error(
+                { filePath: config.blacklist.filePath, type: typeof entries },
+                '[Blacklist] File does not contain a JSON array — treating as empty'
+            );
             return [];
         }
 
-        return entries;
+        // Filter out invalid entries (missing or empty identifier)
+        const invalidEntries: unknown[] = [];
+        const validEntries = entries.filter((entry, index) => {
+            if (!entry || typeof entry !== 'object') {
+                logger.warn(
+                    { index, entry: JSON.stringify(entry), reason: 'not an object' },
+                    '[Blacklist] Skipping invalid entry'
+                );
+                invalidEntries.push(entry);
+                return false;
+            }
+            if (!entry.identifier || typeof entry.identifier !== 'string') {
+                logger.warn(
+                    { index, entry: JSON.stringify(entry), reason: 'missing or invalid identifier field' },
+                    '[Blacklist] Skipping invalid entry'
+                );
+                invalidEntries.push(entry);
+                return false;
+            }
+            return true;
+        });
+
+        // Log summary
+        if (validEntries.length > 0 || invalidEntries.length > 0) {
+            logger.info(
+                { totalLoaded: entries.length, validCount: validEntries.length, invalidCount: invalidEntries.length },
+                '[Blacklist] File loaded and validated'
+            );
+        }
+
+        return validEntries;
     } catch (error) {
-        logger.error({ err: error }, '[Blacklist] Failed to read or parse blacklist file');
+        logger.error(
+            { err: error, filePath: config.blacklist.filePath },
+            '[Blacklist] Failed to read or parse blacklist file'
+        );
         return [];
     }
 };
@@ -71,12 +117,18 @@ const loadBlacklist = (): BlacklistEntry[] => {
 /**
  * Determines the type of identifier and returns the matching rule.
  * Returns true if the identifier matches the given jid and/or pushName.
+ * Safely handles invalid identifiers (never throws).
  */
 const isIdentifierMatch = (
-    identifier: string,
+    identifier: string | undefined,
     jid: string,
     pushName: string | null | undefined
 ): boolean => {
+    // Defensive check: invalid identifier
+    if (!identifier || typeof identifier !== 'string') {
+        return false;
+    }
+
     // Full JID: contains @, match exactly against jid
     if (identifier.includes('@')) {
         return identifier === jid;
@@ -112,9 +164,22 @@ export const isBlacklisted = (
     // Iterate entries and return true on first match
     for (const entry of entries) {
         if (isIdentifierMatch(entry.identifier, jid, pushName)) {
+            // Determine which type of identifier matched for logging
+            let matchType = 'name';
+            if (entry.identifier.includes('@')) {
+                matchType = 'jid';
+            } else if (/^\d+$/.test(entry.identifier)) {
+                matchType = 'phone';
+            }
+
+            logger.info(
+                { jid, pushName: pushName || 'N/A', identifier: entry.identifier, matchType },
+                '[Blacklist] Contact matched — blocking'
+            );
             return true;
         }
     }
 
+    logger.debug({ jid, pushName: pushName || 'N/A' }, '[Blacklist] Contact not on list');
     return false;
 };

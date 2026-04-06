@@ -13,6 +13,7 @@ Baileys WS event
       → isFromMe? → isMessageKnown()
           → known  → skip (bot echo, logged at debug)
           → unknown → clearQueue() — manual reply, session reset
+      → isBlacklisted()? → skip (logged at info with match type)
       → extract text (conversation | extendedTextMessage.text)
       → no text? → skip (non-text message, logged at debug)
       → enqueueMessage() — upserts chat timer, inserts message row
@@ -52,6 +53,45 @@ messages (
 )
 ```
 
+### WhatsApp JID formats
+
+Baileys uses different JID formats depending on the WhatsApp client version and device type:
+
+- **Modern multi-device (`@lid`)**: `205037578002456@lid` — Long numeric device ID. Phone number cannot be extracted.
+- **Legacy web (`@s.whatsapp.net`)**: `919876543210@s.whatsapp.net` — Contains phone number prefix (country code + number, digits only). Format: `[countryCode][phoneNumber]@s.whatsapp.net`.
+- **Groups (`@g.us`)**: `123456789-123345@g.us` — Numeric group ID.
+- **Broadcasts**: `status@broadcast` or `[timestamp]@broadcast`.
+
+**Message metadata** — `msg.pushName` is the contact's display name **only if they have saved your number in their phone**. If null/undefined, the contact hasn't saved you.
+
+### Blacklist feature
+
+**Purpose**: Silently drop incoming messages from specified contacts before any processing (queueing, LLM calls).
+
+**Implementation** (`src/blacklist.ts`):
+- Hot-reload: reads `data/blacklist.json` on every message (no restart required for edits)
+- Three identifier types:
+  - **Full JID** (contains `@`): exact match, e.g. `"205037578002456@lid"` or `"919876543210@s.whatsapp.net"`
+  - **Phone number** (all digits): matches against JID prefix for `@s.whatsapp.net` format, e.g. `"919876543210"`
+  - **Display name** (string): case-insensitive match against `msg.pushName`, e.g. `"Dad"`
+- Validates entries: filters out missing/invalid `identifier` field with warning logs
+- Never throws: returns false (not blacklisted) on file read errors
+
+**Data format** (`data/blacklist.json`):
+```json
+[
+  {"identifier": "205037578002456@lid"},
+  {"identifier": "919876543210"},
+  {"identifier": "Dad"}
+]
+```
+
+**Logging**:
+- **Blacklist initialization**: path and file creation status at `info` level
+- **File loading**: summary with total/valid/invalid counts at `info` level, invalid entries at `warn` level with index/reason
+- **Contact matched**: blocked contact logged at `info` with jid, pushName, identifier, and match type
+- **Contact not blocked**: logged at `debug` level for low-noise troubleshooting
+
 ## Commands
 
 ```bash
@@ -84,6 +124,8 @@ docker-compose up -d --build  # Build and deploy
 - **Outgoing message filtering.** Baileys echoes the bot's own sent messages back as `fromMe: true` events. Guard against this with `isMessageKnown()` before calling `clearQueue()`.
 - **Pure functional DB layer.** All queries in `db.ts` are exported as pure functions. No module-level mutable state.
 - **Reconnection must be explicit.** Handle `DisconnectReason.loggedOut` and `DisconnectReason.connectionReplaced` as terminal — do not reconnect. All other disconnects should retry with a delay.
+- **Blacklist filtering happens early.** The `isBlacklisted()` check in `handleIncomingMessages` (after group/broadcast filter, before text extraction and queueing) ensures no blacklisted contact's messages are processed, queued, or sent to LLM.
+- **No file-based caching for blacklist.** The list is read from disk on every incoming message (hot-reload). Module-level variables are forbidden to ensure manual edits to `data/blacklist.json` take effect immediately without restart.
 
 ## Environment variables
 
