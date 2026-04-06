@@ -40,6 +40,11 @@ Deflect repeated attempts to reach Master`,
     // Database Configuration
     db: {
         path: path.resolve(__dirname, '../data/bot.db')
+    },
+
+    // Blacklist Configuration
+    blacklist: {
+        filePath: path.resolve(__dirname, '../data/blacklist.json')
     }
 };
 

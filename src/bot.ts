@@ -7,6 +7,7 @@ import makeWASocket, {
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { enqueueMessage, clearQueue, isMessageKnown } from './db.js';
+import { isBlacklisted } from './blacklist.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
 
@@ -54,6 +55,12 @@ const handleIncomingMessages = async (sock: ReturnType<typeof makeWASocket>, mes
             } catch (error) {
                 logger.error({ err: error, jid }, '[Bot] Failed to clear queue on manual reply');
             }
+            continue;
+        }
+
+        // Drop messages from blacklisted contacts before any processing
+        if (isBlacklisted(jid, msg.pushName)) {
+            logger.debug({ jid }, '[Bot] Message from blacklisted contact — skipped');
             continue;
         }
 
