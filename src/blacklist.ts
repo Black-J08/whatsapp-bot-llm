@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 import { config } from './config.js';
 import { logger } from './logger.js';
 
@@ -12,6 +13,30 @@ import { logger } from './logger.js';
 export interface BlacklistEntry {
     identifier: string;
 }
+
+/**
+ * Initializes the blacklist file on first run.
+ * Creates an empty JSON array if the file doesn't exist.
+ * Should be called during bot startup.
+ */
+export const initializeBlacklist = (): void => {
+    try {
+        // Ensure the data directory exists
+        const dataDir = path.dirname(config.blacklist.filePath);
+        if (!fs.existsSync(dataDir)) {
+            fs.mkdirSync(dataDir, { recursive: true });
+            logger.debug('[Blacklist] Created data directory');
+        }
+
+        // Create the blacklist file if it doesn't exist
+        if (!fs.existsSync(config.blacklist.filePath)) {
+            fs.writeFileSync(config.blacklist.filePath, JSON.stringify([], null, 2), 'utf-8');
+            logger.info('[Blacklist] Initialized blacklist file with empty array');
+        }
+    } catch (error) {
+        logger.error({ err: error }, '[Blacklist] Failed to initialize blacklist file');
+    }
+};
 
 /**
  * Reads the blacklist file from disk. Hot-reload on every call ensures the list

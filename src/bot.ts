@@ -7,7 +7,7 @@ import makeWASocket, {
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { enqueueMessage, clearQueue, isMessageKnown } from './db.js';
-import { isBlacklisted } from './blacklist.js';
+import { isBlacklisted, initializeBlacklist } from './blacklist.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
 
@@ -97,6 +97,9 @@ const handleIncomingMessages = async (sock: ReturnType<typeof makeWASocket>, mes
  * Returns the socket instance and a cleanup function.
  */
 export const connectToWhatsApp = async () => {
+    // Initialize blacklist file on startup (creates if missing)
+    initializeBlacklist();
+
     // Fetch latest WhatsApp Web version to prevent 405 Method Not Allowed/Version mismatch errors
     const { version, isLatest } = await fetchLatestWaWebVersion();
     logger.info({ version: version.join('.'), isLatest }, '[WhatsApp] Resolved WA web version');
