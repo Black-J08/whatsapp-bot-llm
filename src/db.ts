@@ -101,8 +101,14 @@ export const getExpiredChats = (): ChatRecord[] => {
  * Retrieves all queued messages for a specific chat, ordered by time.
  */
 export const getMessagesForChat = (chatId: string): MessageRecord[] => {
-    return db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp ASC')
-             .all(chatId) as MessageRecord[];
+    // If config is set to 0, use -1 for SQLite LIMIT to retrieve all records
+    const limit = config.llm.maxContextMessages === 0 ? -1 : config.llm.maxContextMessages;
+
+    return db.prepare(`
+        SELECT * FROM (
+            SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?
+        ) ORDER BY timestamp ASC
+    `).all(chatId, limit) as MessageRecord[];
 };
 
 /**
@@ -113,14 +119,30 @@ export const lockChatForProcessing = (chatId: string): void => {
 };
 
 /**
- * Marks a chat as successfully replied and cleans up its queued messages.
+ * Marks a chat as successfully replied.
+ * We no longer delete messages here so we can preserve conversation context.
  */
 export const markChatReplied = (chatId: string): void => {
-    const transaction = db.transaction(() => {
-        db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
-        db.prepare('UPDATE chats SET status = ? WHERE id = ?').run('replied', chatId);
-    });
-    transaction();
+    db.prepare('UPDATE chats SET status = ? WHERE id = ?').run('replied', chatId);
+};
+
+/**
+ * Inserts a message sent by the bot into the database to preserve conversational context.
+ */
+export const insertBotMessage = (chatId: string, messageId: string, content: string, timestamp: number): void => {
+    db.prepare(`
+        INSERT OR IGNORE INTO messages (id, chat_id, content, timestamp, is_from_me)
+        VALUES (?, ?, ?, ?, 1)
+    `).run(messageId, chatId, content, timestamp);
+};
+
+/**
+ * Checks if a message ID already exists in the database.
+ * Useful for differentiating bot echoes from human manual replies.
+ */
+export const isMessageKnown = (messageId: string): boolean => {
+    const row = db.prepare('SELECT 1 FROM messages WHERE id = ?').get(messageId);
+    return !!row;
 };
 
 /**

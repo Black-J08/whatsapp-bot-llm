@@ -6,7 +6,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
-import { enqueueMessage, clearQueue } from './db.js';
+import { enqueueMessage, clearQueue, isMessageKnown } from './db.js';
 import { logger } from './logger.js';
 
 // Define a strict Pino logger instance for Baileys to avoid verbose console spam
@@ -37,7 +37,12 @@ const handleIncomingMessages = async (sock: ReturnType<typeof makeWASocket>, mes
         const isFromMe = msg.key.fromMe;
 
         // If the human owner replies manually, cancel any pending auto-reply queue
+        // But if it's the bot echoing its own outgoing message, ignore it completely
         if (isFromMe) {
+            if (msg.key.id && isMessageKnown(msg.key.id)) {
+                continue; // It's our own bot message, skip it
+            }
+
             try {
                 clearQueue(jid);
             } catch (error) {

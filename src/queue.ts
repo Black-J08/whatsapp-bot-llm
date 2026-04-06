@@ -1,6 +1,6 @@
 import { logger } from './logger.js';
 import makeWASocket from '@whiskeysockets/baileys';
-import { getExpiredChats, getMessagesForChat, lockChatForProcessing, markChatReplied } from './db.js';
+import { getExpiredChats, getMessagesForChat, lockChatForProcessing, markChatReplied, insertBotMessage } from './db.js';
 import { getLLMProvider } from './llm/factory.js';
 import { ChatMessage } from './llm/types.js';
 import { config } from './config.js';
@@ -36,7 +36,7 @@ export const processQueues = async (sock: ReturnType<typeof makeWASocket>): Prom
 
             // Map DB records to ChatMessage format expected by LLMProvider
             const chatMessages: ChatMessage[] = messages.map(msg => ({
-                role: 'user', // For now, all queued messages are from the remote user
+                role: msg.is_from_me ? 'assistant' : 'user',
                 content: msg.content
             }));
 
@@ -46,7 +46,14 @@ export const processQueues = async (sock: ReturnType<typeof makeWASocket>): Prom
 
                 if (replyText) {
                     logger.info(`[Queue Processor] Sending reply to ${chat.id}`);
-                    await sock.sendMessage(chat.id, { text: replyText });
+                    const sentMsg = await sock.sendMessage(chat.id, { text: replyText });
+
+                    if (sentMsg?.key?.id) {
+                        const timestamp = typeof sentMsg.messageTimestamp === 'number'
+                            ? sentMsg.messageTimestamp * 1000
+                            : Date.now();
+                        insertBotMessage(chat.id, sentMsg.key.id, replyText, timestamp);
+                    }
                 }
 
                 // Mark successful

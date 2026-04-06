@@ -1,36 +1,96 @@
-## Project Context & Architecture
-WhatsApp auto-reply bot using `@whiskeysockets/baileys` and an agnostic LLM Provider abstraction (currently using Google Gemini `gemini-2.5-flash-lite`).
+## Project overview
 
-### Core Architectural Flow
-1. **Connection & Auth:** Baileys WebSocket connects and stores session state locally in `auth_info_baileys/`. **Never modify this directory manually.**
-2. **Event Queue & Delay Mechanism (The "Away" Logic):** 
-   - Messages from personal DMs (`@s.whatsapp.net`) are written to the database `messages` table.
-   - The chat is upserted into the `chats` table with a future `timer_expires_at` timestamp.
-   - If the bot detects an outgoing message (`fromMe: true`) in that chat, the queue for that chat is immediately wiped.
-3. **Queue Processor:** A background interval polls `chats` for expired timers.
-4. **LLM Processing:** Expired chats are locked (`status='processing'`), queued messages are fetched and passed to the modular `LLMProvider` interface (via `llm/factory.ts`).
-5. **Delivery:** The LLM response is sent back via Baileys. The chat is marked as `replied` and messages are cleaned up. No typing indicators are used.
+WhatsApp auto-reply bot using `@whiskeysockets/baileys` and a modular `LLMProvider` abstraction. Currently backed by Google Gemini (`gemini-2.5-flash-lite`). Designed to run indefinitely as a single Docker container on localhost with no exposed ports.
 
-### Deployment & Infrastructure Requirements
-- **Docker Only Deployment:** The application must be containerized. It requires strict volume mounts for persistent data to prevent data loss:
-  - Mount `./auth_info_baileys:/app/auth_info_baileys` (For WhatsApp session state).
-  - Mount `./data:/app/data` (For the file-based database).
-  - Mount `./logs:/app/logs` (For rotating application logs).
-- **Localhost Networking Only:** The application must NOT expose ports to the outside network. `docker-compose.yml` uses `network_mode: "host"`.
-- **File-Based Database:** State (queues, caching, and chat tracking) MUST be stored in `better-sqlite3` in the `/app/data` volume. In-memory Maps are strictly forbidden for long-running delays.
-- **Resumability & Graceful Shutdown:** The entire system must be fully resumable. On `SIGINT`/`SIGTERM`, the app gracefully stops the queue processor, closes the Baileys socket, and flushes the database connection.
+## Architecture
 
-### Commands
-- **Run dev:** `npm run dev` (Runs via `tsx`)
-- **Build:** `npm run build` (Compiles TypeScript to `dist/`)
-- **Run prod:** `npm start` (Runs compiled code)
-- **Deploy:** `docker-compose up -d --build`
-- **Lint:** `npm run lint`
+### Request flow
 
-### Technical Constraints & Rules
-- **Pure Functions & Immutability:** DB queries are wrapped in pure functional exports. The event listener does not mutate global state.
-- **Strict Typing:** All Baileys events, LLM interfaces, and DB schemas must be strictly typed. No `any`.
-- **LLM Abstraction:** The system MUST use an adapter pattern (`LLMProvider`). Do not tightly couple the queue processor to a specific LLM API.
-- **Centralized Structured Logging:** `console.log` and `console.error` are strictly forbidden. The system MUST use the centralized `pino` rotating logger (`src/logger.ts`) for all standard outputs and errors. Logs are rotated daily into `/logs/bot-log.log`.
-- **Event Filtering:** Aggressively filter out group messages (`@g.us`), broadcasts (`status@broadcast`), and outgoing messages (`fromMe: true`) at the very top of the event listener to prevent infinite loops.
-- **Error Handling:** Network disconnects from WhatsApp are normal. Reconnect logic must be explicit. Errors during LLM generation must be caught, logged using `logger.error()`, and silently ignored (do not crash the bot, do not send error text to the WhatsApp user).
+```
+Baileys WS event
+  → handleIncomingMessages (bot.ts)
+      → filter: skip groups, broadcasts, outgoing
+      → isFromMe? → isMessageKnown()
+          → known  → skip (bot echo)
+          → unknown → clearQueue() — manual reply, session reset
+      → enqueueMessage() — upserts chat timer, inserts message row
+          ↓
+Queue processor (queue.ts) — polls every QUEUE_POLL_INTERVAL_MS
+  → getExpiredChats()
+  → lockChatForProcessing()
+  → getMessagesForChat() — last N messages, role-mapped
+  → llm.generateReply(messages, systemPrompt)
+  → sock.sendMessage()
+  → insertBotMessage() — saves bot reply for future context
+  → markChatReplied()
+```
+
+### Conversational context
+
+- Bot replies are persisted in the `messages` table (`is_from_me = 1`) and included as `role: 'assistant'` in subsequent LLM calls.
+- A manual reply from the owner (`isFromMe: true`, not a known bot echo) calls `clearQueue()`, which deletes all messages for that chat, resetting the conversation session.
+- Context window size is controlled by `LLM_MAX_CONTEXT_MESSAGES` (0 = unlimited).
+
+### Database schema
+
+```sql
+chats (
+  id TEXT PRIMARY KEY,          -- WhatsApp JID
+  status TEXT NOT NULL,         -- 'queued' | 'processing' | 'replied'
+  timer_expires_at INTEGER,     -- Unix ms — when to fire the auto-reply
+  last_msg_timestamp INTEGER
+)
+
+messages (
+  id TEXT PRIMARY KEY,          -- Baileys message key ID
+  chat_id TEXT,                 -- FK → chats.id (CASCADE DELETE)
+  content TEXT,
+  timestamp INTEGER,            -- Unix ms
+  is_from_me INTEGER            -- 0 = incoming user, 1 = bot auto-reply
+)
+```
+
+## Commands
+
+```bash
+npm run dev                   # Run via tsx (development)
+npm run build                 # Compile TypeScript → dist/
+npm start                     # Run compiled output
+npm run lint                  # Lint source files
+docker-compose up -d --build  # Build and deploy
+```
+
+## Deployment requirements
+
+- **Docker only.** The app must run containerised. Do not run bare `npm start` in production.
+- **Volume mounts are mandatory** — data will not survive container restarts without them:
+  - `./auth_info_baileys:/app/auth_info_baileys` — WhatsApp session state
+  - `./data:/app/data` — SQLite database
+  - `./logs:/app/logs` — rotating log files
+- **No exposed ports.** `docker-compose.yml` uses `network_mode: "host"`. Do not change this.
+- **Never modify `auth_info_baileys/` manually.** It is managed exclusively by Baileys.
+
+## Technical constraints
+
+- **No `console.log` / `console.error`.** All output must go through the `pino` logger in `src/logger.ts`.
+- **No `any` types.** All Baileys events, LLM interfaces, and DB schemas must be strictly typed.
+- **No in-memory state for queues.** All pending timers and messages live in SQLite. In-memory Maps are forbidden.
+- **LLM abstraction is mandatory.** The queue processor must only interact with the `LLMProvider` interface — never a concrete SDK directly.
+- **Errors during LLM generation must not crash the bot** and must not send error text to the WhatsApp user. Catch, log with `logger.error()`, and mark the chat as replied to prevent retry loops.
+- **Outgoing message filtering.** Baileys echoes the bot's own sent messages back as `fromMe: true` events. Guard against this with `isMessageKnown()` before calling `clearQueue()`.
+- **Pure functional DB layer.** All queries in `db.ts` are exported as pure functions. No module-level mutable state.
+- **Reconnection must be explicit.** Handle `DisconnectReason.loggedOut` and `DisconnectReason.connectionReplaced` as terminal — do not reconnect. All other disconnects should retry with a delay.
+
+## Environment variables
+
+All config is read from `.env` via `src/config.ts`. See `README.md` for the full reference.
+
+| Variable | Default | Description |
+|---|---|---|
+| `GEMINI_API_KEY` | — | Required. Google Gemini API key. |
+| `LLM_PROVIDER` | `gemini` | LLM backend to use. |
+| `MODEL_NAME` | `gemini-2.5-flash-lite` | Model identifier passed to the provider. |
+| `LLM_MAX_CONTEXT_MESSAGES` | `20` | Messages passed as context. `0` = unlimited. |
+| `SYSTEM_PROMPT` | (hardcoded default) | Instructions given to the LLM. |
+| `QUEUE_DELAY_MS` | `300000` | Debounce delay before auto-reply fires (ms). |
+| `QUEUE_POLL_INTERVAL_MS` | `10000` | Queue processor poll interval (ms). |

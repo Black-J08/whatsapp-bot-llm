@@ -1,94 +1,140 @@
-# WhatsApp LLM Auto-Reply Bot
+# whatsapp-bot-llm
 
-[![Node.js](https://img.shields.io/badge/Node.js-20.x-green.svg)](https://nodejs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
-[![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](https://www.docker.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+A self-hosted WhatsApp "away assistant" that replies on your behalf using an LLM when you're unavailable. Built with [`@whiskeysockets/baileys`](https://github.com/WhiskeySockets/Baileys), `better-sqlite3`, and Google Gemini.
 
-A robust, resumable, and privacy-focused WhatsApp auto-reply bot built with [`@whiskeysockets/baileys`](https://github.com/WhiskeySockets/Baileys), `better-sqlite3`, and Google Gemini (`gemini-2.5-flash-lite`).
+## How it works
 
-## Overview
+The bot implements a **debounced queue** — it does not reply instantly. Instead:
 
-This bot operates strictly as an **"Away Assistant"**. Instead of replying instantly to every incoming message, it implements a smart debouncing and queueing mechanism.
+1. An incoming personal DM is written to a persistent SQLite database and a countdown timer starts.
+2. Every new message from the same contact resets the timer.
+3. If **you reply manually**, the queue and all conversation context for that chat are immediately wiped. The bot stays silent.
+4. If the timer expires without a manual reply, the bot sends the full conversation history (up to a configurable limit) to the LLM and replies on your behalf.
+5. The bot's reply is saved to the database so future responses have multi-turn context.
 
-When a personal DM arrives:
-1. The message is queued in a persistent SQLite database.
-2. The bot waits for a designated period (configurable, e.g., 5 minutes).
-3. If you manually reply to the chat within that time (`fromMe: true`), the queue is wiped, and the bot stays silent.
-4. If the timer expires and you haven't replied, the bot sends the queued message history to the LLM and replies on your behalf.
+## Stack
 
-## Architecture & Tech Stack
-
-- **WhatsApp Web API:** `@whiskeysockets/baileys` (WebSocket)
-- **Database / Queue:** `better-sqlite3` (File-based, WAL mode enabled for concurrency)
-- **LLM Abstraction:** Modular Factory Pattern (Currently implementing `@google/genai`)
-- **Logging:** `pino` & `pino-roll` (Structured daily rotating logs)
-- **Language:** TypeScript (Strict typing, ES Modules)
-
-## Features
-
-- **Graceful Shutdown & Resumability:** On `SIGINT`/`SIGTERM`, the socket closes cleanly, and the database flushes. Upon restart, the background queue processor resumes tracking pending timers.
-- **Smart Filtering:** Automatically ignores group chats (`@g.us`), broadcasts (`status@broadcast`), and outgoing messages.
-- **LLM Agnostic Design:** Built with a clean `LLMProvider` interface, allowing you to easily swap Google Gemini with OpenAI, Anthropic, or local models.
-- **Rotating Logs:** Features centralized logging outputting to daily rotating files (`logs/bot-log.log`) using `pino` to avoid excessive disk consumption.
-- **Docker-Ready:** Containerized with strict volume mounts for session state, databases, and logs.
+| Concern | Library |
+|---|---|
+| WhatsApp protocol | `@whiskeysockets/baileys` (WebSocket, no Puppeteer) |
+| Database / queue | `better-sqlite3` (WAL mode, file-based) |
+| LLM | `@google/genai` — Gemini, via an agnostic `LLMProvider` adapter |
+| Logging | `pino` + `pino-roll` (structured, daily-rotating) |
+| Language | TypeScript 6, strict mode, ES Modules |
 
 ## Prerequisites
 
-- Node.js (v20+ recommended)
-- Docker & Docker Compose (for production deployment)
-- Google Gemini API Key
+- Node.js 20+
+- Docker & Docker Compose (production)
+- A Google Gemini API key
 
-## Setup & Local Development
+## Setup
 
-1. **Install Dependencies**
-   ```bash
-   npm install
-   ```
+**1. Clone and install**
 
-2. **Environment Variables**
-   Create a `.env` file in the root directory:
-   ```env
-   # LLM Configuration
-   LLM_PROVIDER=gemini
-   GEMINI_API_KEY=your_google_gemini_api_key
-   MODEL_NAME=gemini-2.5-flash-lite
-   SYSTEM_PROMPT="You are an AI assistant managing my personal WhatsApp while I am away. Reply naturally, concisely, and helpfully."
+```bash
+git clone <repo-url>
+cd whatsapp-bot-llm
+npm install
+```
 
-   # Queue & Timing Configuration
-   QUEUE_DELAY_MS=300000        # Delay before auto-replying (5 minutes)
-   QUEUE_POLL_INTERVAL_MS=10000 # Interval for the queue processor loop
-   ```
+**2. Configure environment**
 
-3. **Run in Development Mode**
-   ```bash
-   npm run dev
-   ```
-   *Note: On the first run, the terminal will display a QR code. Scan it with your WhatsApp mobile app via "Linked Devices" to authenticate.*
+Copy the example below into a `.env` file in the project root and fill in your values.
 
-4. **Build for Production**
-   ```bash
-   npm run build
-   ```
+```env
+# ── LLM ────────────────────────────────────────────────────────────────────────
+GEMINI_API_KEY=your_google_gemini_api_key
+LLM_PROVIDER=gemini
+MODEL_NAME=gemini-2.5-flash-lite
 
-## Production Deployment (Docker)
+# Max messages passed to the LLM for context. Set to 0 for unlimited.
+LLM_MAX_CONTEXT_MESSAGES=20
 
-To run this in a production environment, use the provided `docker-compose.yml`. Ensure you mount the required volumes so you do not lose your WhatsApp session, pending message queues, or logs:
+# Override the default system prompt (optional)
+# SYSTEM_PROMPT="You are an AI assistant managing my personal WhatsApp..."
+
+# ── Queue & timing ──────────────────────────────────────────────────────────────
+# Delay before auto-replying after the last message (milliseconds)
+QUEUE_DELAY_MS=300000        # 5 minutes
+
+# How often the background processor checks for expired timers (milliseconds)
+QUEUE_POLL_INTERVAL_MS=10000 # 10 seconds
+```
+
+**3. Run in development**
+
+```bash
+npm run dev
+```
+
+On the first run a QR code is printed to the terminal. Scan it in WhatsApp → **Linked Devices → Link a device**.
+
+## Deployment
+
+The application is designed to run as a single Docker container with host networking (no exposed ports).
 
 ```bash
 docker-compose up -d --build
 ```
 
-**Volume Bindings Explained:**
-- `./auth_info_baileys:/app/auth_info_baileys` — Stores the persistent WhatsApp auth session.
-- `./data:/app/data` — Stores the `bot.db` SQLite database holding active message queues.
-- `./logs:/app/logs` — Stores daily rotating log files generated by Pino.
+**Required volume mounts** (defined in `docker-compose.yml`):
+
+| Host path | Container path | Purpose |
+|---|---|---|
+| `./auth_info_baileys` | `/app/auth_info_baileys` | WhatsApp session state |
+| `./data` | `/app/data` | SQLite database |
+| `./logs` | `/app/logs` | Rotating log files |
+| `./.env` | `/app/.env` (read-only) | Environment configuration |
+
+> **Do not delete `auth_info_baileys/` manually.** This directory holds your authenticated session. Deleting it requires re-scanning a QR code.
+
+## Commands
+
+```bash
+npm run dev      # Run with tsx (development, hot-reload)
+npm run build    # Compile TypeScript → dist/
+npm start        # Run compiled output (production)
+npm run lint     # Lint source files
+docker-compose up -d --build  # Build image and deploy
+```
+
+## Project structure
+
+```
+src/
+├── index.ts          # Entry point — wires up bot, queue processor, and shutdown
+├── bot.ts            # Baileys connection, event filtering, message enqueueing
+├── queue.ts          # Background processor — LLM calls and reply dispatch
+├── db.ts             # All SQLite queries as pure functional exports
+├── config.ts         # Centralised config parsed from environment variables
+├── logger.ts         # Pino logger with daily-rotating file transport
+└── llm/
+    ├── types.ts      # LLMProvider interface and ChatMessage type
+    ├── factory.ts    # Provider factory — resolves LLM_PROVIDER at runtime
+    └── gemini.ts     # Google Gemini adapter implementing LLMProvider
+```
+
+## Adding a new LLM provider
+
+1. Create `src/llm/<provider>.ts` implementing the `LLMProvider` interface from `src/llm/types.ts`.
+2. Add a case for it in `src/llm/factory.ts`.
+3. Set `LLM_PROVIDER=<provider>` in `.env`.
 
 ## Troubleshooting
 
-- **Connection Loop / DisconnectReason 440 or 405:** Ensure only *one* instance of the bot is running at a time. The bot actively prevents "ping-pong" reconnection loops if another session takes over.
-- **Session Issues:** If authentication fails or gets corrupted, delete the `auth_info_baileys` folder and restart the application to generate a new QR code.
-- **Missing Auto-Replies:** Check the `logs/bot-log.log` file. Ensure `GEMINI_API_KEY` is set correctly and that the database volume is strictly mounted.
+**QR code not appearing / auth loop**
+Delete `auth_info_baileys/` and restart. A fresh QR will be generated.
+
+**Bot not auto-replying**
+Check `logs/current.log`. Verify `GEMINI_API_KEY` is set and `QUEUE_DELAY_MS` has elapsed.
+
+**Multiple sessions conflict (disconnect code 440 / 405)**
+Only one instance may run at a time. The bot detects `connectionReplaced` and halts reconnection automatically to avoid a ping-pong loop.
+
+**Logs**
+Structured JSON logs rotate daily under `logs/`. The symlink `logs/current.log` always points to today's file.
 
 ## License
-MIT License
+
+ISC
