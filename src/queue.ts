@@ -7,9 +7,7 @@ import { config } from './config.js';
 
 /**
  * Processes queued messages whose timers have expired.
- * This is a pure function that fetches expired chats, queries the LLM, and dispatches the response.
- *
- * @param sock The Baileys socket instance
+ * Fetches expired chats, builds conversational context, queries the LLM, and dispatches the response.
  */
 export const processQueues = async (sock: ReturnType<typeof makeWASocket>): Promise<void> => {
     try {
@@ -19,65 +17,72 @@ export const processQueues = async (sock: ReturnType<typeof makeWASocket>): Prom
             return;
         }
 
+        logger.info({ count: expiredChats.length }, '[Queue] Processing expired chats');
+
         const llm = getLLMProvider();
 
         for (const chat of expiredChats) {
-            logger.info(`[Queue Processor] Timer expired for ${chat.id}. Processing messages...`);
-
-            // Lock the chat to prevent concurrent processing by the next interval tick
+            // Lock first to prevent the next poll tick from picking up the same chat
             lockChatForProcessing(chat.id);
+            logger.info({ chatId: chat.id }, '[Queue] Timer expired — locked for processing');
 
             const messages = getMessagesForChat(chat.id);
             if (messages.length === 0) {
-                // Somehow empty, just mark as replied to clean up state
+                // Chat has no messages (e.g. cleared mid-flight) — clean up state
+                logger.warn({ chatId: chat.id }, '[Queue] No messages found for expired chat — marking replied');
                 markChatReplied(chat.id);
                 continue;
             }
 
-            // Map DB records to ChatMessage format expected by LLMProvider
+            // Map DB records to the role-tagged ChatMessage format expected by LLMProvider
             const chatMessages: ChatMessage[] = messages.map(msg => ({
                 role: msg.is_from_me ? 'assistant' : 'user',
                 content: msg.content
             }));
 
+            logger.info({ chatId: chat.id, contextMessages: chatMessages.length }, '[Queue] Sending context to LLM');
+
             try {
-                logger.info(`[Queue Processor] Requesting LLM response for ${chat.id}...`);
                 const replyText = await llm.generateReply(chatMessages, config.llm.systemPrompt);
 
-                if (replyText) {
-                    logger.info(`[Queue Processor] Sending reply to ${chat.id}`);
-                    const sentMsg = await sock.sendMessage(chat.id, { text: replyText });
-
-                    if (sentMsg?.key?.id) {
-                        const timestamp = typeof sentMsg.messageTimestamp === 'number'
-                            ? sentMsg.messageTimestamp * 1000
-                            : Date.now();
-                        insertBotMessage(chat.id, sentMsg.key.id, replyText, timestamp);
-                    }
+                if (!replyText) {
+                    logger.warn({ chatId: chat.id }, '[Queue] LLM returned empty reply — skipping send');
+                    markChatReplied(chat.id);
+                    continue;
                 }
 
-                // Mark successful
+                logger.info({ chatId: chat.id, replyLength: replyText.length }, '[Queue] LLM reply received — sending');
+                const sentMsg = await sock.sendMessage(chat.id, { text: replyText });
+
+                if (sentMsg?.key?.id) {
+                    const timestamp = typeof sentMsg.messageTimestamp === 'number'
+                        ? sentMsg.messageTimestamp * 1000
+                        : Date.now();
+                    insertBotMessage(chat.id, sentMsg.key.id, replyText, timestamp);
+                    logger.info({ chatId: chat.id, messageId: sentMsg.key.id }, '[Queue] Bot reply saved to context');
+                } else {
+                    logger.warn({ chatId: chat.id }, '[Queue] Sent message has no key ID — bot reply not saved to context');
+                }
+
                 markChatReplied(chat.id);
+                logger.info({ chatId: chat.id }, '[Queue] Chat marked as replied');
             } catch (error) {
-                logger.error(error as Error, `[Queue Processor] Error processing chat ${chat.id}:`);
-                // In case of error, we can leave it in 'processing' or revert it.
-                // Reverting it might cause an infinite error loop. We'll mark it replied/cleared
-                // to avoid spamming the LLM API on failure, as per "graceful failure" constraint.
+                logger.error({ err: error, chatId: chat.id }, '[Queue] Error during LLM processing — marking replied to prevent retry loop');
+                // Mark replied rather than leaving in 'processing' to avoid an infinite retry loop on
+                // persistent LLM failures, as required by the graceful failure constraint.
                 markChatReplied(chat.id);
             }
         }
     } catch (error) {
-        logger.error(error as Error, '[Queue Processor] Fatal error during queue processing loop:');
+        logger.error({ err: error }, '[Queue] Fatal error in queue processing loop');
     }
 };
 
 /**
  * Starts the interval loop that checks for expired queues.
- * @param sock The Baileys socket instance
- * @returns The NodeJS timeout handle
  */
 export const startQueueProcessor = (sock: ReturnType<typeof makeWASocket>): NodeJS.Timeout => {
-    logger.info(`[System] Starting queue processor with a poll interval of ${config.queue.pollIntervalMs}ms`);
+    logger.info({ pollIntervalMs: config.queue.pollIntervalMs }, '[Queue] Queue processor started');
     return setInterval(() => {
         processQueues(sock);
     }, config.queue.pollIntervalMs);

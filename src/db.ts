@@ -28,6 +28,7 @@ const initDb = () => {
             FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
         );
     `);
+    logger.info('[DB] Schema initialised');
 };
 initDb();
 
@@ -76,6 +77,7 @@ export const enqueueMessage = (chatId: string, messageId: string, content: strin
     });
 
     transaction();
+    logger.debug({ chatId, messageId, expiresAt }, '[DB] Message enqueued and chat timer upserted');
 };
 
 /**
@@ -87,6 +89,7 @@ export const clearQueue = (chatId: string): void => {
         db.prepare('UPDATE chats SET status = ? WHERE id = ?').run('replied', chatId);
     });
     transaction();
+    logger.info({ chatId }, '[DB] Queue cleared — all messages deleted and chat marked replied');
 };
 
 /**
@@ -116,6 +119,7 @@ export const getMessagesForChat = (chatId: string): MessageRecord[] => {
  */
 export const lockChatForProcessing = (chatId: string): void => {
     db.prepare('UPDATE chats SET status = ? WHERE id = ?').run('processing', chatId);
+    logger.debug({ chatId }, '[DB] Chat locked for processing');
 };
 
 /**
@@ -124,6 +128,7 @@ export const lockChatForProcessing = (chatId: string): void => {
  */
 export const markChatReplied = (chatId: string): void => {
     db.prepare('UPDATE chats SET status = ? WHERE id = ?').run('replied', chatId);
+    logger.debug({ chatId }, '[DB] Chat marked as replied');
 };
 
 /**
@@ -134,6 +139,7 @@ export const insertBotMessage = (chatId: string, messageId: string, content: str
         INSERT OR IGNORE INTO messages (id, chat_id, content, timestamp, is_from_me)
         VALUES (?, ?, ?, ?, 1)
     `).run(messageId, chatId, content, timestamp);
+    logger.debug({ chatId, messageId }, '[DB] Bot message inserted into context');
 };
 
 /**

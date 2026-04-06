@@ -9,16 +9,18 @@ WhatsApp auto-reply bot using `@whiskeysockets/baileys` and a modular `LLMProvid
 ```
 Baileys WS event
   → handleIncomingMessages (bot.ts)
-      → filter: skip groups, broadcasts, outgoing
+      → filter: skip groups (@g.us), broadcasts (status@broadcast)
       → isFromMe? → isMessageKnown()
-          → known  → skip (bot echo)
+          → known  → skip (bot echo, logged at debug)
           → unknown → clearQueue() — manual reply, session reset
+      → extract text (conversation | extendedTextMessage.text)
+      → no text? → skip (non-text message, logged at debug)
       → enqueueMessage() — upserts chat timer, inserts message row
           ↓
 Queue processor (queue.ts) — polls every QUEUE_POLL_INTERVAL_MS
   → getExpiredChats()
   → lockChatForProcessing()
-  → getMessagesForChat() — last N messages, role-mapped
+  → getMessagesForChat() — last N messages, role-mapped (user/assistant)
   → llm.generateReply(messages, systemPrompt)
   → sock.sendMessage()
   → insertBotMessage() — saves bot reply for future context
@@ -73,6 +75,8 @@ docker-compose up -d --build  # Build and deploy
 ## Technical constraints
 
 - **No `console.log` / `console.error`.** All output must go through the `pino` logger in `src/logger.ts`.
+- **Structured log fields only — no string interpolation.** Use `logger.info({ key: value }, 'message')` not `logger.info(`text ${value}`)`. Dynamic values belong in the fields object, never in the message string.
+- **Log levels:** `info` for significant state changes (message received, reply sent, session reset), `warn` for unexpected but non-fatal conditions (empty LLM reply, missing message ID), `debug` for high-frequency internal transitions (DB mutations, echo skips, filter hits), `error` for caught failures with `{ err: error }` as the first field.
 - **No `any` types.** All Baileys events, LLM interfaces, and DB schemas must be strictly typed.
 - **No in-memory state for queues.** All pending timers and messages live in SQLite. In-memory Maps are forbidden.
 - **LLM abstraction is mandatory.** The queue processor must only interact with the `LLMProvider` interface — never a concrete SDK directly.

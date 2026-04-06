@@ -8,6 +8,7 @@ import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { enqueueMessage, clearQueue, isMessageKnown } from './db.js';
 import { logger } from './logger.js';
+import { config } from './config.js';
 
 // Define a strict Pino logger instance for Baileys to avoid verbose console spam
 const baileysLogger = logger.child({});
@@ -27,28 +28,33 @@ const handleIncomingMessages = async (sock: ReturnType<typeof makeWASocket>, mes
         const jid = msg.key.remoteJid;
         if (!jid) continue;
 
-        // Architectural constraints from CLAUDE.md:
-        // Filter out groups and broadcasts
+        // Filter out groups and broadcasts — bot is personal DMs only
         const isGroup = jid.endsWith('@g.us');
         const isBroadcast = jid === 'status@broadcast';
 
-        if (isGroup || isBroadcast) continue;
+        if (isGroup || isBroadcast) {
+            logger.debug({ jid, reason: isGroup ? 'group' : 'broadcast' }, '[Bot] Skipping non-DM message');
+            continue;
+        }
 
         const isFromMe = msg.key.fromMe;
 
-        // If the human owner replies manually, cancel any pending auto-reply queue
-        // But if it's the bot echoing its own outgoing message, ignore it completely
+        // Outgoing message — either a bot echo or a manual reply from the owner
         if (isFromMe) {
             if (msg.key.id && isMessageKnown(msg.key.id)) {
-                continue; // It's our own bot message, skip it
+                // Bot echo: Baileys re-emits our own sent message — ignore silently
+                logger.debug({ jid, messageId: msg.key.id }, '[Bot] Skipping bot echo');
+                continue;
             }
 
+            // Manual reply from owner: wipe the queue and reset session context
+            logger.info({ jid }, '[Bot] Manual reply detected — clearing queue and resetting session context');
             try {
                 clearQueue(jid);
             } catch (error) {
-                logger.error(error as Error, `[Error] Failed to clear queue for ${jid}:`);
+                logger.error({ err: error, jid }, '[Bot] Failed to clear queue on manual reply');
             }
-            continue; // Stop further processing for outgoing messages
+            continue;
         }
 
         // Extract text safely from the message payload
@@ -56,22 +62,25 @@ const handleIncomingMessages = async (sock: ReturnType<typeof makeWASocket>, mes
             msg.message.conversation ||
             msg.message.extendedTextMessage?.text;
 
-        if (textContent) {
-            logger.info(`[Message Received] From: ${jid} | Text: ${textContent}`);
+        if (!textContent) {
+            // Non-text message (image, sticker, audio, etc.) — skip silently
+            logger.debug({ jid, messageType: Object.keys(msg.message)[0] }, '[Bot] Skipping non-text message');
+            continue;
+        }
 
-            const messageId = msg.key.id || Date.now().toString();
-            // Baileys messageTimestamp is in seconds, SQLite usually expects milliseconds in JS context
-            const timestamp = typeof msg.messageTimestamp === 'number'
-                ? msg.messageTimestamp * 1000
-                : Date.now();
+        logger.info({ jid, messageId: msg.key.id, content: textContent }, '[Bot] Incoming message received');
 
-            try {
-                // Enqueue the message. The DB layer handles upserting the timer logic.
-                enqueueMessage(jid, messageId, textContent, timestamp);
-                logger.info(`[Queue] Message enqueued for ${jid}. Waiting for timer.`);
-            } catch (error) {
-                logger.error(error as Error, `[Error] Failed to enqueue message for ${jid}:`);
-            }
+        const messageId = msg.key.id || Date.now().toString();
+        // Baileys messageTimestamp is in seconds; convert to ms for SQLite consistency
+        const timestamp = typeof msg.messageTimestamp === 'number'
+            ? msg.messageTimestamp * 1000
+            : Date.now();
+
+        try {
+            enqueueMessage(jid, messageId, textContent, timestamp);
+            logger.info({ jid, messageId, expiresInMs: config.queue.delayMs }, '[Bot] Message enqueued — timer started');
+        } catch (error) {
+            logger.error({ err: error, jid, messageId }, '[Bot] Failed to enqueue message');
         }
     }
 };
@@ -83,7 +92,7 @@ const handleIncomingMessages = async (sock: ReturnType<typeof makeWASocket>, mes
 export const connectToWhatsApp = async () => {
     // Fetch latest WhatsApp Web version to prevent 405 Method Not Allowed/Version mismatch errors
     const { version, isLatest } = await fetchLatestWaWebVersion();
-    logger.info(`[WhatsApp] Using WA v${version.join('.')}, isLatest: ${isLatest}`);
+    logger.info({ version: version.join('.'), isLatest }, '[WhatsApp] Resolved WA web version');
 
     // Session state directory as per CLAUDE.md Docker volume requirements
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info_baileys');
@@ -115,17 +124,18 @@ export const connectToWhatsApp = async () => {
                 statusCode !== DisconnectReason.loggedOut &&
                 statusCode !== DisconnectReason.connectionReplaced;
 
-            logger.info(`[WhatsApp] Connection closed. Reason: ${statusCode}. Reconnecting: ${shouldReconnect}`);
+            logger.info({ statusCode, shouldReconnect }, '[WhatsApp] Connection closed');
 
             if (statusCode === DisconnectReason.connectionReplaced) {
-                logger.info('[WhatsApp] Connection replaced by another session. Not reconnecting to avoid ping-pong conflict.');
+                logger.warn('[WhatsApp] Connection replaced by another session — halting to avoid ping-pong conflict');
             } else if (statusCode === DisconnectReason.loggedOut) {
-                logger.info('[WhatsApp] Logged out. Please restart to scan a new QR code.');
+                logger.warn('[WhatsApp] Logged out — restart to scan a new QR code');
             } else if (shouldReconnect) {
+                logger.info({ retryDelayMs: 2000 }, '[WhatsApp] Scheduling reconnect');
                 setTimeout(connectToWhatsApp, 2000);
             }
         } else if (connection === 'open') {
-            logger.info('[WhatsApp] Connection established successfully!');
+            logger.info('[WhatsApp] Connection established successfully');
         }
     });
 
