@@ -33,9 +33,11 @@ export class GeminiProvider implements LLMProvider {
             });
 
             return response.text || '';
-        } catch (error) {
-            logger.error(error as Error, '[GeminiProvider] Error generating response:');
-            throw new Error('Failed to generate response from Gemini');
+        } catch (error: unknown) {
+            // Re-throw the original error — queue.ts catches it with chatId for full log context
+            const err = error instanceof Error ? error : new Error(String(error));
+            logger.error({ err }, '[GeminiProvider] Gemini API request failed');
+            throw err;
         }
     }
 }

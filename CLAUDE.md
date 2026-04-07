@@ -55,14 +55,34 @@ messages (
 
 ### WhatsApp JID formats
 
-Baileys uses different JID formats depending on the WhatsApp client version and device type:
+Baileys v7 supports two JID formats. You can message any contact using either:
 
-- **Modern multi-device (`@lid`)**: `205037578002456@lid` — Long numeric device ID. Phone number cannot be extracted.
-- **Legacy web (`@s.whatsapp.net`)**: `919876543210@s.whatsapp.net` — Contains phone number prefix (country code + number, digits only). Format: `[countryCode][phoneNumber]@s.whatsapp.net`.
-- **Groups (`@g.us`)**: `123456789-123345@g.us` — Numeric group ID.
-- **Broadcasts**: `status@broadcast` or `[timestamp]@broadcast`.
+- **LID (`@lid`)**: `205037578002456@lid` — WhatsApp's new Local Identifier. Preferred and
+  more reliable. All new Signal sessions default to LID.
+- **PN (`@s.whatsapp.net`)**: `919876543210@s.whatsapp.net` — Legacy phone number format.
+  Less reliable; avoid for new code.
 
-**Message metadata** — `msg.pushName` is the contact's display name **only if they have saved your number in their phone**. If null/undefined, the contact hasn't saved you.
+**Detecting format** — use Baileys utilities, never manual string ops:
+- `isPnUser(jid)` — true for `@s.whatsapp.net` (replaces removed `isJidUser`)
+- `isLidUser(jid)` — true for `@lid`
+- `isJidGroup(jid)` — true for `@g.us`
+- `isJidStatusBroadcast(jid)` — true for `status@broadcast`
+- `jidDecode(jid)?.user` — extracts local part (phone digits for PN; device ID for LID)
+
+**`WAMessageKey` v7 additions:**
+- `remoteJidAlt` — alternate JID for DMs (if `remoteJid` is LID, this is the PN, and
+  vice versa). Use to enable phone-based matching when primary JID is LID-addressed.
+- `participantAlt` — alternate participant JID for groups/broadcasts.
+- `addressingMode` — `"pn"` or `"lid"` indicating which format was used.
+
+**`Contact` v7 interface:**
+- `id` — preferred identifier (may be LID or PN)
+- `phoneNumber?` — present when `id` is a LID
+- `lid?` — present when `id` is a PN
+- No longer has a `jid` field.
+
+**`pushName`** — `msg.pushName` is the contact's display name **only if they have saved
+your number in their phone**. If null/undefined, the contact hasn't saved you.
 
 ### Blacklist feature
 
@@ -71,8 +91,8 @@ Baileys uses different JID formats depending on the WhatsApp client version and 
 **Implementation** (`src/blacklist.ts`):
 - Hot-reload: reads `data/blacklist.json` on every message (no restart required for edits)
 - Three identifier types:
-  - **Full JID** (contains `@`): exact match, e.g. `"205037578002456@lid"` or `"919876543210@s.whatsapp.net"`
-  - **Phone number** (all digits): matches against JID prefix for `@s.whatsapp.net` format, e.g. `"919876543210"`
+  - **Full JID** (contains `@`): exact match against primary or alternate JID, e.g. `"205037578002456@lid"` or `"919876543210@s.whatsapp.net"`
+  - **Phone number** (all digits): matches only PN-format JIDs (`@s.whatsapp.net`). Also checks `remoteJidAlt` so LID-addressed messages from a known PN are still caught, e.g. `"919876543210"`
   - **Display name** (string): case-insensitive match against `msg.pushName`, e.g. `"Dad"`
 - Validates entries: filters out missing/invalid `identifier` field with warning logs
 - Never throws: returns false (not blacklisted) on file read errors
@@ -124,6 +144,8 @@ docker-compose up -d --build  # Build and deploy
 - **Outgoing message filtering.** Baileys echoes the bot's own sent messages back as `fromMe: true` events. Guard against this with `isMessageKnown()` before calling `clearQueue()`.
 - **Pure functional DB layer.** All queries in `db.ts` are exported as pure functions. No module-level mutable state.
 - **Reconnection must be explicit.** Handle `DisconnectReason.loggedOut` and `DisconnectReason.connectionReplaced` as terminal — do not reconnect. All other disconnects should retry with a delay.
+- **Use Baileys JID utilities.** Never use manual string operations on JIDs. Use `isPnUser`, `isLidUser`, `isJidGroup`, `isJidStatusBroadcast`, and `jidDecode` from Baileys. Note: `isJidUser` was removed in v7 — use `isPnUser` instead.
+- **`remoteJidAlt` for dual-format matching.** When checking identity against a user input (e.g. blacklist), check both `msg.key.remoteJid` and `msg.key.remoteJidAlt` to handle both LID-addressed and PN-addressed messages from the same contact.
 - **Blacklist filtering happens early.** The `isBlacklisted()` check in `handleIncomingMessages` (after group/broadcast filter, before text extraction and queueing) ensures no blacklisted contact's messages are processed, queued, or sent to LLM.
 - **No file-based caching for blacklist.** The list is read from disk on every incoming message (hot-reload). Module-level variables are forbidden to ensure manual edits to `data/blacklist.json` take effect immediately without restart.
 

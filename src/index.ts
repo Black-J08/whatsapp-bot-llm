@@ -38,8 +38,9 @@ const init = async () => {
         process.on('SIGINT', shutdown);
         process.on('SIGTERM', shutdown);
 
-    } catch (error) {
-        logger.error(error as Error, '[System] Fatal error during initialization:');
+    } catch (error: unknown) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        logger.error({ err }, '[System] Fatal error during initialization');
         closeDb();
         process.exit(1);
     }

@@ -2,13 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import { config } from './config.js';
 import { logger } from './logger.js';
+import { isPnUser, isLidUser, jidDecode } from './utils/jid.js';
 
 /**
  * Represents a single blacklist entry.
  * The identifier can be:
- *  - A phone number (digits only, e.g. "9112345678")
- *  - A display name (no @ or pure digits, e.g. "John")
- *  - A full JID (contains @, e.g. "9112345678@s.whatsapp.net")
+ *  - A full JID (contains @): exact match, e.g. "9112345678@s.whatsapp.net" or "205037578002456@lid"
+ *  - A phone number (digits only): matches PN JIDs only; LID JIDs have no phone, e.g. "919876543210"
+ *  - A display name (anything else): case-insensitive match against pushName, e.g. "John"
  */
 export interface BlacklistEntry {
     identifier: string;
@@ -116,12 +117,13 @@ const loadBlacklist = (): BlacklistEntry[] => {
 
 /**
  * Determines the type of identifier and returns the matching rule.
- * Returns true if the identifier matches the given jid and/or pushName.
+ * Returns true if the identifier matches the given jid, altJid, and/or pushName.
  * Safely handles invalid identifiers (never throws).
  */
 const isIdentifierMatch = (
     identifier: string | undefined,
     jid: string,
+    altJid: string | null | undefined,
     pushName: string | null | undefined
 ): boolean => {
     // Defensive check: invalid identifier
@@ -129,15 +131,26 @@ const isIdentifierMatch = (
         return false;
     }
 
-    // Full JID: contains @, match exactly against jid
+    // Full JID: exact match against primary JID or alternate JID
+    // Checks both because of LID/PN dual addressing: if remoteJid is LID, remoteJidAlt is PN (and vice versa)
     if (identifier.includes('@')) {
-        return identifier === jid;
+        return identifier === jid || (altJid != null && identifier === altJid);
     }
 
-    // Phone number: all digits, match against the numeric part of jid
+    // Phone number: only match PN JIDs — LIDs have no extractable phone
+    // Checks both primary and alternate JID because message might arrive either way
     if (/^\d+$/.test(identifier)) {
-        const phoneFromJid = jid.split('@')[0];
-        return identifier === phoneFromJid;
+        // Check primary JID if it's a PN
+        if (isPnUser(jid)) {
+            const phoneFromJid = jidDecode(jid)?.user;
+            if (phoneFromJid != null && identifier === phoneFromJid) return true;
+        }
+        // Check alternate JID if it's a PN (primary was LID-addressed)
+        if (altJid != null && isPnUser(altJid)) {
+            const phoneFromAlt = jidDecode(altJid)?.user;
+            if (phoneFromAlt != null && identifier === phoneFromAlt) return true;
+        }
+        return false;
     }
 
     // Display name: case-insensitive match against pushName
@@ -151,19 +164,21 @@ const isIdentifierMatch = (
  * without requiring a bot restart. Safely returns false if the file is unreadable,
  * never throwing so the message handler is not disrupted.
  *
- * @param jid The sender's full WhatsApp JID, e.g. "9112345678@s.whatsapp.net"
+ * @param jid The sender's full WhatsApp JID, e.g. "9112345678@s.whatsapp.net" or "205037578002456@lid"
+ * @param altJid The alternate JID (remoteJidAlt from WAMessageKey) for dual-format matching
  * @param pushName The sender's display name from Baileys (may be null or undefined)
  * @returns true if the sender is on the blacklist, false otherwise
  */
 export const isBlacklisted = (
     jid: string,
+    altJid: string | null | undefined,
     pushName: string | null | undefined
 ): boolean => {
     const entries = loadBlacklist();
 
     // Iterate entries and return true on first match
     for (const entry of entries) {
-        if (isIdentifierMatch(entry.identifier, jid, pushName)) {
+        if (isIdentifierMatch(entry.identifier, jid, altJid, pushName)) {
             // Determine which type of identifier matched for logging
             let matchType = 'name';
             if (entry.identifier.includes('@')) {
@@ -173,13 +188,13 @@ export const isBlacklisted = (
             }
 
             logger.info(
-                { jid, pushName: pushName || 'N/A', identifier: entry.identifier, matchType },
+                { jid, altJid: altJid ?? 'N/A', pushName: pushName || 'N/A', identifier: entry.identifier, matchType },
                 '[Blacklist] Contact matched — blocking'
             );
             return true;
         }
     }
 
-    logger.debug({ jid, pushName: pushName || 'N/A' }, '[Blacklist] Contact not on list');
+    logger.debug({ jid, altJid: altJid ?? 'N/A', pushName: pushName || 'N/A' }, '[Blacklist] Contact not on list');
     return false;
 };

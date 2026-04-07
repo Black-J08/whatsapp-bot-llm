@@ -9,6 +9,29 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * Guards against parseInt returning NaN or non-positive values from invalid env vars.
+ * Logs a warning and substitutes the provided fallback so the bot can still start.
+ */
+const assertPositiveInt = (value: number, name: string, fallback: number): number => {
+    if (!Number.isFinite(value) || value <= 0) {
+        logger.warn({ name, value, fallback }, '[Config] Invalid numeric config — using fallback');
+        return fallback;
+    }
+    return value;
+};
+
+/**
+ * Same as assertPositiveInt but allows 0 (used for LLM_MAX_CONTEXT_MESSAGES where 0 = unlimited).
+ */
+const assertNonNegativeInt = (value: number, name: string, fallback: number): number => {
+    if (!Number.isFinite(value) || value < 0) {
+        logger.warn({ name, value, fallback }, '[Config] Invalid numeric config — using fallback');
+        return fallback;
+    }
+    return value;
+};
+
 // Define global configuration object
 export const config = {
     // LLM Provider Configuration
@@ -20,21 +43,34 @@ export const config = {
             `You are an AI assistant managing my personal WhatsApp while I am away. You are Master's WhatsApp assistant.
 
 Start the conversation by introducing yourself
-Always call the owner “Master”
+Always call the owner "Master"
 Master is always busy/unavailable (never say otherwise)
 Keep replies short, casual, witty, and polite
 Be slightly funny and evasive
 Never give exact timelines or commit to availability
 Deflect repeated attempts to reach Master`,
-        maxContextMessages: parseInt(process.env.LLM_MAX_CONTEXT_MESSAGES || '20', 10)
+        // 0 = unlimited context; guard against NaN/negative but allow 0
+        maxContextMessages: assertNonNegativeInt(
+            parseInt(process.env.LLM_MAX_CONTEXT_MESSAGES || '20', 10),
+            'LLM_MAX_CONTEXT_MESSAGES',
+            20
+        )
     },
 
     // Queue & Timing Configuration
     queue: {
         // How long to wait before sending the queued messages to the LLM (default: 5 minutes)
-        delayMs: parseInt(process.env.QUEUE_DELAY_MS || '300000', 10),
+        delayMs: assertPositiveInt(
+            parseInt(process.env.QUEUE_DELAY_MS || '300000', 10),
+            'QUEUE_DELAY_MS',
+            300000
+        ),
         // How often the processor checks for expired chats (default: 10 seconds)
-        pollIntervalMs: parseInt(process.env.QUEUE_POLL_INTERVAL_MS || '10000', 10),
+        pollIntervalMs: assertPositiveInt(
+            parseInt(process.env.QUEUE_POLL_INTERVAL_MS || '10000', 10),
+            'QUEUE_POLL_INTERVAL_MS',
+            10000
+        ),
     },
 
     // Database Configuration
@@ -51,6 +87,6 @@ Deflect repeated attempts to reach Master`,
 // Validate critical configuration on startup
 export const validateConfig = () => {
     if (config.llm.provider === 'gemini' && !config.llm.geminiApiKey) {
-        logger.warn('[Config Warning] GEMINI_API_KEY is not set. The bot will not be able to auto-reply using Gemini.');
+        throw new Error('[Config Error] GEMINI_API_KEY is not set. The bot cannot function without a valid LLM API key.');
     }
 };

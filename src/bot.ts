@@ -4,33 +4,17 @@ import makeWASocket, {
     WAMessage,
     fetchLatestWaWebVersion
 } from '@whiskeysockets/baileys';
+import { isPnUser, isLidUser, isJidGroup, isJidStatusBroadcast, contactLogFields, extractPhoneFromJid } from './utils/jid.js';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
-import { enqueueMessage, clearQueue, isMessageKnown } from './db.js';
-import { isBlacklisted, initializeBlacklist } from './blacklist.js';
-import { logger } from './logger.js';
+import { initializeBlacklist, isBlacklisted } from './blacklist.js';
 import { config } from './config.js';
+import { clearQueue, enqueueMessage, isMessageKnown } from './db.js';
+import { logger } from './logger.js';
 
 // Define a strict Pino logger instance for Baileys to avoid verbose console spam
 const baileysLogger = logger.child({});
 baileysLogger.level = 'silent';
-
-/**
- * Extracts phone number from JID when available.
- * For @s.whatsapp.net format: "919876543210@s.whatsapp.net" → "919876543210"
- * For @lid format: "205037578002456@lid" → null (device ID, not phone)
- * Returns null if phone cannot be extracted (e.g., @lid format)
- */
-const extractPhoneFromJid = (jid: string): string | null => {
-    // @s.whatsapp.net format: contains phone number as prefix
-    if (jid.includes('@s.whatsapp.net')) {
-        const phone = jid.split('@')[0];
-        // Verify it's all digits (valid phone format)
-        return /^\d+$/.test(phone) ? phone : null;
-    }
-    // @lid format: device identifier, not extractable to phone
-    return null;
-};
 
 /**
  * Handles incoming messages, applying filters and inserting them into the database queue.
@@ -46,24 +30,17 @@ const handleIncomingMessages = async (sock: ReturnType<typeof makeWASocket>, mes
         const jid = msg.key.remoteJid;
         if (!jid) continue;
 
-        // Extract identifying information for logging
-        const phone = extractPhoneFromJid(jid);
-        // pushName is the contact's display name if they've saved your number in their phone.
-        // If null, the contact hasn't saved your number and no name is available from Baileys.
-        const name = msg.pushName || null;
+        // Build contact context once per message — used by all log calls below.
+        // phone is omitted for LID contacts (no extractable number); name is omitted if pushName is null.
+        const logCtx = contactLogFields(jid, msg.pushName);
 
         // Filter out groups and broadcasts — bot is personal DMs only
-        const isGroup = jid.endsWith('@g.us');
-        const isBroadcast = jid === 'status@broadcast';
+        const isGroup = isJidGroup(jid) ?? false;
+        const isBroadcast = isJidStatusBroadcast(jid);
 
         if (isGroup || isBroadcast) {
             logger.debug(
-                {
-                    jid,
-                    phone: phone || 'N/A',
-                    name: name || 'N/A',
-                    reason: isGroup ? 'group' : 'broadcast'
-                },
+                { ...logCtx, reason: isGroup ? 'group' : 'broadcast' },
                 '[Bot] Skipping non-DM message'
             );
             continue;
@@ -76,34 +53,27 @@ const handleIncomingMessages = async (sock: ReturnType<typeof makeWASocket>, mes
             if (msg.key.id && isMessageKnown(msg.key.id)) {
                 // Bot echo: Baileys re-emits our own sent message — ignore silently
                 logger.debug(
-                    { jid, phone: phone || 'N/A', name: name || 'N/A', messageId: msg.key.id },
+                    { ...logCtx, messageId: msg.key.id },
                     '[Bot] Skipping bot echo'
                 );
                 continue;
             }
 
             // Manual reply from owner: wipe the queue and reset session context
-            logger.info(
-                { jid, phone: phone || 'N/A', name: name || 'N/A' },
-                '[Bot] Manual reply detected — clearing queue and resetting session context'
-            );
+            logger.info(logCtx, '[Bot] Manual reply detected — clearing queue and resetting session context');
             try {
                 clearQueue(jid);
-            } catch (error) {
-                logger.error(
-                    { err: error, jid, phone: phone || 'N/A', name: name || 'N/A' },
-                    '[Bot] Failed to clear queue on manual reply'
-                );
+            } catch (error: unknown) {
+                const err = error instanceof Error ? error : new Error(String(error));
+                logger.error({ err, ...logCtx }, '[Bot] Failed to clear queue on manual reply');
             }
             continue;
         }
 
         // Drop messages from blacklisted contacts before any processing
-        if (isBlacklisted(jid, msg.pushName)) {
-            logger.debug(
-                { jid, phone: phone || 'N/A', name: name || 'N/A' },
-                '[Bot] Message from blacklisted contact — skipped'
-            );
+        // remoteJidAlt is the alternate JID when primary is LID (or vice versa)
+        if (isBlacklisted(jid, msg.key.remoteJidAlt ?? null, msg.pushName)) {
+            logger.debug(logCtx, '[Bot] Message from blacklisted contact — skipped');
             continue;
         }
 
@@ -115,25 +85,14 @@ const handleIncomingMessages = async (sock: ReturnType<typeof makeWASocket>, mes
         if (!textContent) {
             // Non-text message (image, sticker, audio, etc.) — skip silently
             logger.debug(
-                {
-                    jid,
-                    phone: phone || 'N/A',
-                    name: name || 'N/A',
-                    messageType: Object.keys(msg.message)[0]
-                },
+                { ...logCtx, messageType: Object.keys(msg.message)[0] },
                 '[Bot] Skipping non-text message'
             );
             continue;
         }
 
         logger.info(
-            {
-                jid,
-                phone: phone || 'N/A',
-                name: name || 'N/A',
-                messageId: msg.key.id,
-                content: textContent
-            },
+            { ...logCtx, messageId: msg.key.id, content: textContent },
             '[Bot] Incoming message received'
         );
 
@@ -146,20 +105,12 @@ const handleIncomingMessages = async (sock: ReturnType<typeof makeWASocket>, mes
         try {
             enqueueMessage(jid, messageId, textContent, timestamp);
             logger.info(
-                {
-                    jid,
-                    phone: phone || 'N/A',
-                    name: name || 'N/A',
-                    messageId,
-                    expiresInMs: config.queue.delayMs
-                },
+                { ...logCtx, messageId, expiresInMs: config.queue.delayMs },
                 '[Bot] Message enqueued — timer started'
             );
-        } catch (error) {
-            logger.error(
-                { err: error, jid, phone: phone || 'N/A', name: name || 'N/A', messageId },
-                '[Bot] Failed to enqueue message'
-            );
+        } catch (error: unknown) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            logger.error({ err, ...logCtx, messageId }, '[Bot] Failed to enqueue message');
         }
     }
 };
@@ -172,9 +123,16 @@ export const connectToWhatsApp = async () => {
     // Initialize blacklist file on startup (creates if missing)
     initializeBlacklist();
 
-    // Fetch latest WhatsApp Web version to prevent 405 Method Not Allowed/Version mismatch errors
-    const { version, isLatest } = await fetchLatestWaWebVersion();
-    logger.info({ version: version.join('.'), isLatest }, '[WhatsApp] Resolved WA web version');
+    // Fetch latest WhatsApp Web version to prevent 405 Method Not Allowed/Version mismatch errors.
+    // Guards against null return — falls back to a known-good version rather than crashing on .join().
+    const waResult = await fetchLatestWaWebVersion();
+    const version = waResult?.version ?? [2, 3000, 1015901307];
+    const isLatest = waResult?.isLatest ?? false;
+    if (!waResult?.version) {
+        logger.warn({ fallbackVersion: version.join('.') }, '[WhatsApp] fetchLatestWaWebVersion returned null — using fallback version');
+    } else {
+        logger.info({ version: version.join('.'), isLatest }, '[WhatsApp] Resolved WA web version');
+    }
 
     // Session state directory as per CLAUDE.md Docker volume requirements
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info_baileys');
@@ -193,7 +151,7 @@ export const connectToWhatsApp = async () => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            logger.info('\n[WhatsApp] Scan the QR code below to authenticate:');
+            logger.info('[WhatsApp] Scan the QR code below to authenticate:');
             qrcode.generate(qr, { small: true });
         }
 
@@ -217,11 +175,13 @@ export const connectToWhatsApp = async () => {
                 setTimeout(connectToWhatsApp, 2000);
             }
         } else if (connection === 'open') {
-            // Log authenticated user info when connection established
+            // Log authenticated user info when connection is established
             const userId = sock.user?.id;
-            const userPhone = userId ? extractPhoneFromJid(userId) : null;
+            const userIdFormat = userId
+                ? (isLidUser(userId) ? 'lid' : isPnUser(userId) ? 'pn' : 'unknown')
+                : null;
             logger.info(
-                { jid: userId, phone: userPhone },
+                { jid: userId, phone: userId ? extractPhoneFromJid(userId) : undefined, idFormat: userIdFormat },
                 '[WhatsApp] Connection established successfully'
             );
         }
@@ -242,7 +202,7 @@ export const connectToWhatsApp = async () => {
      * Graceful termination function for the socket
      */
     const closeSocket = (): void => {
-        logger.info('[WhatsApp] Closing socket connection...');
+        logger.info('[WhatsApp] Closing socket connection');
         sock.ws.close();
     };
 
