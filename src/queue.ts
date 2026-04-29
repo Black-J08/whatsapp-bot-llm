@@ -1,7 +1,7 @@
 import { logger } from './logger.js';
 import makeWASocket from '@whiskeysockets/baileys';
 import { getExpiredChats, getMessagesForChat, lockChatForProcessing, markChatReplied, insertBotMessage } from './db.js';
-import { getLLMProvider } from './llm/factory.js';
+import { FailoverLLMProvider } from './llm/failover.js';
 import { ChatMessage } from './llm/types.js';
 import { config } from './config.js';
 import { contactLogFields } from './utils/jid.js';
@@ -20,7 +20,7 @@ export const processQueues = async (sock: ReturnType<typeof makeWASocket>): Prom
 
         logger.info({ count: expiredChats.length }, '[Queue] Processing expired chats');
 
-        const llm = getLLMProvider();
+        const llm = new FailoverLLMProvider();
 
         for (const chat of expiredChats) {
             // Outer try/catch covers lockChatForProcessing and the no-messages branch.

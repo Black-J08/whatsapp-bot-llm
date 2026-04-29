@@ -1,6 +1,6 @@
 ## Project overview
 
-WhatsApp auto-reply bot using `@whiskeysockets/baileys` and a modular `LLMProvider` abstraction. Currently backed by Google Gemini (`gemini-2.5-flash-lite`). Designed to run indefinitely as a single Docker container on localhost with no exposed ports.
+WhatsApp auto-reply bot using `@whiskeysockets/baileys` and a modular `LLMProvider` abstraction. Supports Gemini (primary, when available) and Ollama (fallback, auto-selected from env credentials). Includes resilient retry + failover logic. Designed to run indefinitely as a single Docker container on localhost with no exposed ports.
 
 ## Architecture
 
@@ -155,10 +155,13 @@ All config is read from `.env` via `src/config.ts`. See `README.md` for the full
 
 | Variable | Default | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | — | Required. Google Gemini API key. |
-| `LLM_PROVIDER` | `gemini` | LLM backend to use. |
-| `MODEL_NAME` | `gemini-2.5-flash-lite` | Model identifier passed to the provider. |
+| `GEMINI_API_KEY` | — | Gemini API key. Preferred provider when set. |
+| `MODEL_NAME` | `gemini-3.1-flash-lite-preview` | Model identifier for Gemini. |
+| `OLLAMA_API_KEY` | — | Ollama Cloud API key. Required to use Ollama as a provider. |
+| `OLLAMA_BASE_URL` | `https://ollama.com/api` | Ollama Cloud API base URL. |
+| `OLLAMA_MODEL_NAME` | `gemma4:31b-cloud` | Model identifier for Ollama. |
 | `LLM_MAX_CONTEXT_MESSAGES` | `20` | Messages passed as context. `0` = unlimited. |
+| `LLM_RETRY_DELAY_MS` | `100` | Base retry delay (ms); multiplied by attempt number for exponential backoff. |
 | `SYSTEM_PROMPT` | (hardcoded default) | Instructions given to the LLM. |
 | `QUEUE_DELAY_MS` | `300000` | Debounce delay before auto-reply fires (ms). |
 | `QUEUE_POLL_INTERVAL_MS` | `10000` | Queue processor poll interval (ms). |

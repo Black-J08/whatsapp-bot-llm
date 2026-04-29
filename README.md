@@ -1,6 +1,6 @@
 # whatsapp-bot-llm
 
-A self-hosted WhatsApp "away assistant" that replies on your behalf using an LLM when you're unavailable. Built with [`@whiskeysockets/baileys`](https://github.com/WhiskeySockets/Baileys), `better-sqlite3`, and Google Gemini.
+A self-hosted WhatsApp "away assistant" that replies on your behalf using an LLM when you're unavailable. Built with [`@whiskeysockets/baileys`](https://github.com/WhiskeySockets/Baileys), `better-sqlite3`, and modular LLM provider support (Gemini or Ollama).
 
 ## How it works
 
@@ -59,7 +59,7 @@ Edit `data/blacklist.json` to block incoming messages from specific contacts. Th
 |---|---|
 | WhatsApp protocol | `@whiskeysockets/baileys` (WebSocket, no Puppeteer) |
 | Database / queue | `better-sqlite3` (WAL mode, file-based) |
-| LLM | `@google/genai` — Gemini, via an agnostic `LLMProvider` adapter |
+| LLM | Gemini (`@google/genai`) or Ollama, via `LLMProvider` adapter with automatic failover |
 | Logging | `pino` + `pino-roll` (structured, daily-rotating) |
 | Language | TypeScript 6, strict mode, ES Modules |
 
@@ -67,7 +67,7 @@ Edit `data/blacklist.json` to block incoming messages from specific contacts. Th
 
 - Node.js 20+
 - Docker & Docker Compose (production)
-- A Google Gemini API key
+- One of: Google Gemini API key, or Ollama Cloud credentials (or local Ollama instance)
 
 ## Setup
 
@@ -84,23 +84,23 @@ npm install
 Copy the example below into a `.env` file in the project root and fill in your values.
 
 ```env
-# ── LLM ────────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY=your_google_gemini_api_key
-LLM_PROVIDER=gemini
-MODEL_NAME=gemini-2.5-flash-lite
+# ── LLM Provider ──────────────────────────────────────────────────────────────
+# Gemini (preferred when key is present)
+GEMINI_API_KEY=your-gemini-api-key-here
+MODEL_NAME=gemini-3.1-flash-lite-preview
 
-# Max messages passed to the LLM for context. Set to 0 for unlimited.
+# Ollama (used when GEMINI_API_KEY is absent; always Ollama Cloud)
+OLLAMA_API_KEY=your-ollama-api-key-here
+OLLAMA_MODEL_NAME=gemma4:31b-cloud
+
+# ── LLM Behaviour ─────────────────────────────────────────────────────────────
 LLM_MAX_CONTEXT_MESSAGES=20
+LLM_RETRY_DELAY_MS=100
+# SYSTEM_PROMPT=
 
-# Override the default system prompt (optional)
-# SYSTEM_PROMPT="You are an AI assistant managing my personal WhatsApp..."
-
-# ── Queue & timing ──────────────────────────────────────────────────────────────
-# Delay before auto-replying after the last message (milliseconds)
-QUEUE_DELAY_MS=300000        # 5 minutes
-
-# How often the background processor checks for expired timers (milliseconds)
-QUEUE_POLL_INTERVAL_MS=10000 # 10 seconds
+# ── Queue Timing ──────────────────────────────────────────────────────────────
+QUEUE_DELAY_MS=300000
+QUEUE_POLL_INTERVAL_MS=10000
 ```
 
 **3. Run in development**
@@ -155,15 +155,27 @@ src/
 ├── blacklist.ts      # Contact filtering — hot-reload file-based blocklist
 └── llm/
     ├── types.ts      # LLMProvider interface and ChatMessage type
-    ├── factory.ts    # Provider factory — resolves LLM_PROVIDER at runtime
-    └── gemini.ts     # Google Gemini adapter implementing LLMProvider
+    ├── factory.ts    # Dual-provider factory with auto-selection and failover setup
+    ├── failover.ts   # Retry + fallback wrapper (configurable delay, up to 3 retries)
+    ├── gemini.ts     # Google Gemini adapter implementing LLMProvider
+    └── ollama.ts     # Ollama Cloud / local adapter implementing LLMProvider
 ```
+
+## LLM Provider selection
+
+The system automatically detects available LLM credentials and selects a provider:
+
+1. **Gemini is preferred** — if `GEMINI_API_KEY` is set, Gemini is used as the primary provider.
+2. **Ollama is fallback** — if Gemini credentials are absent, Ollama (Cloud or local) is used.
+3. **Automatic failover** — if the primary provider fails after 3 retries (with configurable `LLM_RETRY_DELAY_MS`), the system automatically switches to the alternate provider.
+
+Both providers can be configured simultaneously for automatic failover (e.g. Gemini as primary, Ollama Cloud as backup).
 
 ## Adding a new LLM provider
 
 1. Create `src/llm/<provider>.ts` implementing the `LLMProvider` interface from `src/llm/types.ts`.
-2. Add a case for it in `src/llm/factory.ts`.
-3. Set `LLM_PROVIDER=<provider>` in `.env`.
+2. Update `src/llm/factory.ts` to instantiate and manage the new provider alongside existing ones.
+3. Add corresponding environment variables to `src/config.ts`.
 
 ## Troubleshooting
 

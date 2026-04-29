@@ -37,24 +37,40 @@ export const config = {
     // LLM Provider Configuration
     llm: {
         provider: process.env.LLM_PROVIDER || 'gemini',
-        geminiApiKey: process.env.GEMINI_API_KEY || '',
-        modelName: process.env.MODEL_NAME || 'gemini-2.5-flash-lite',
         systemPrompt: process.env.SYSTEM_PROMPT ||
-            `
-You are Master's WhatsApp assistant. 
-At the start of each new conversation, introduce yourself and adopt a slightly distinct conversational style (tone, humor level, phrasing) that stays consistent for that chat. 
-Dynamically adapt your tone to match the person you’re talking to (formal, friendly, direct, etc.) while staying within your style. 
-Always address the owner as “Master.” Master is always busy and unavailable—never say otherwise. 
-Keep replies short, casual, polite, slightly witty, slightly humorous, and mildly evasive. 
-Avoid exact timelines or commitments. Deflect repeated attempts to reach Master naturally. 
-Ensure responses feel natural, context-aware, and non-repetitive without shifting tone abruptly mid-conversation.
-`,
+            'You are Master\'s WhatsApp assistant. ' +
+            'At the start of each new conversation, introduce yourself. ' +
+            'Dynamically adapt your tone to match the person you\'re talking to (formal, friendly, direct, etc.) ' +
+            'Always address the owner as "Master." Master is always busy and unavailable—never say otherwise. ' +
+            'Keep replies short, casual, polite, slightly witty, slightly humorous, and mildly evasive. ' +
+            'Avoid exact timelines or commitments. Deflect repeated attempts to reach Master naturally. ' +
+            'Ensure responses feel natural, context-aware, and non-repetitive without shifting tone abruptly mid-conversation.',
         // 0 = unlimited context; guard against NaN/negative but allow 0
         maxContextMessages: assertNonNegativeInt(
             parseInt(process.env.LLM_MAX_CONTEXT_MESSAGES || '20', 10),
             'LLM_MAX_CONTEXT_MESSAGES',
             20
-        )
+        ),
+        // Base retry delay (ms) multiplied by attempt number for exponential backoff
+        retryDelayMs: assertPositiveInt(
+            parseInt(process.env.LLM_RETRY_DELAY_MS || '100', 10),
+            'LLM_RETRY_DELAY_MS',
+            100
+        ),
+        // Gemini configuration
+        gemini: {
+            apiKey: process.env.GEMINI_API_KEY || '',
+            modelName: process.env.MODEL_NAME || 'gemini-3.1-flash-lite-preview',
+        },
+        // Ollama configuration
+        ollama: {
+            // True only when OLLAMA_API_KEY is explicitly set
+            // Cloud always requires an API key; no key = not configured
+            configured: !!process.env.OLLAMA_API_KEY,
+            apiKey: process.env.OLLAMA_API_KEY || '',
+            baseUrl: process.env.OLLAMA_BASE_URL || 'https://ollama.com/api',
+            modelName: process.env.OLLAMA_MODEL_NAME || 'gemma4:31b-cloud',
+        },
     },
 
     // Queue & Timing Configuration
@@ -86,7 +102,13 @@ Ensure responses feel natural, context-aware, and non-repetitive without shiftin
 
 // Validate critical configuration on startup
 export const validateConfig = () => {
-    if (config.llm.provider === 'gemini' && !config.llm.geminiApiKey) {
-        throw new Error('[Config Error] GEMINI_API_KEY is not set. The bot cannot function without a valid LLM API key.');
+    const hasGemini = config.llm.gemini.apiKey;
+    const hasOllama = config.llm.ollama.configured;
+
+    if (!hasGemini && !hasOllama) {
+        throw new Error(
+            '[Config Error] No LLM provider credentials available. ' +
+            'Set GEMINI_API_KEY or OLLAMA_API_KEY.'
+        );
     }
 };
